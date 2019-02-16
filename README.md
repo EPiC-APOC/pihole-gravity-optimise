@@ -36,6 +36,7 @@ exit
 
 #### Manually running the gravityOptimise script
 `gravityOptimise.sh`
+
 alternative:
 `sudo gravityOptimise.sh >> /tmp/gravityOptimise.log 2>&1`
 
