@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 
+#(sudo) gravityOptimise.sh >> /tmp/gravityOptimise.log 2>&1
+
 # Set file variables
 file_gravity="/etc/pihole/gravity.list"
 dir_wildcards="/etc/dnsmasq.d"
