@@ -1,0 +1,1 @@
+00 6 * * * root PATH="$PATH:/usr/local/bin/" gravityOptimise.sh
