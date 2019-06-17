@@ -1,171 +1,162 @@
 #!/usr/bin/env bash
-
-#(sudo) gravityOptimise.sh >> /tmp/gravityOptimise.log 2>&1
+# shellcheck disable=SC2034  # Unused variables left for readability
 
 # Set file variables
-file_gravity="/etc/pihole/gravity.list"
-dir_wildcards="/etc/dnsmasq.d"
-file_regex="/etc/pihole/regex.list"
+db_gravity='/etc/pihole/gravity.db'
+dir_dnsmasq='/etc/dnsmasq.d'
+file_gravity='/etc/pihole/gravity.list'
+file_regex='/etc/pihole/regex.list'
+usingDB=false
 
-invertMatchConflicts () {
+# Check for Pi-hole DB
+if [[ -s "${db_gravity}" ]]; then
+	echo '[i] Pi-hole DB detected'
+	usingDB=true
+fi
 
-	# Conditional exit
-	# Return supplied match criteria (all domains)
-	if [ -z "$1" ] || [ -z "$2" ]; then
-		echo "$2"
+# Functions
+function fetchTable {
+	# Define local variables
+	local table="${1}" queryStr
+	# Set query string
+	queryStr="Select domain FROM vw_${table};"
+	# Run the query
+	sqlite3 ${db_gravity} "${queryStr}" 2>&1
+	# Check exit status
+	status="$?"
+	[[ "${status}" -ne 0 ]]  && { (>&2 echo '[i] An error occured whilst fetching results'); return 1; }
+
+	return 0
+}
+
+function updateGravityDB {
+
+	# Code here is adapted from /opt/pihole/gravity.sh
+
+	local file_gravity_tmp="${1}" table='gravity'
+
+	# Another conditional exit
+	if [[ ! -s "${file_gravity_tmp}" ]]; then
+		echo "[i] Unable to process ${file_gravity_tmp}"
 		return 1
 	fi
 
+	# Truncate gravity table
+	output=$( { sudo sqlite3 ${db_gravity} "DELETE FROM ${table}"; } 2>&1 )
+	status="$?"
+
+	[[ "${status}" -ne  0 ]] && echo '[i] Failed to truncate gravity DB' && return 1
+
+	# Upload optimised gravity
+	output=$( { printf ".mode csv\\n.import \"%s\" %s\\n" "${file_gravity_tmp}" "${table}" | sudo sqlite3 "${db_gravity}"; } 2>&1 )
+	status="$?"
+
+	[[ "${status}" -ne  0 ]] && echo '[i] Unable to load entries into gravity' && return 1
+
+	return 0
+}
+
+# Update gravity
+echo '[i] Updating gravity'
+pihole updateGravity > /dev/null
+
+# Conditional fetch for gravity domains
+if [[ $usingDB == true ]]; then
+	str_gravity=$(fetchTable "gravity")
+else
+	str_gravity=$(cat "${file_gravity}")
+fi
+
+# If a result is returned
+if [[ -n "${str_gravity}" ]]; then
+	# Make a temporary file
+	file_gravity_tmp=$(mktemp --suffix=.gravity)
+	# Output current gravity domains to temp file
+	echo "${str_gravity}" > "${file_gravity_tmp}"
+else
+	echo '[i] No gravity domains were found'; exit 1;
+fi
+
+# Grab gravity count pre-processing
+num_gravity_before=$(wc -l < "${file_gravity_tmp}")
+
+# Identify existing local wildcards
+echo '[i] Parsing existing wildcard config (DNSMASQ)'
+existing_wildcards=$(find "${dir_dnsmasq}" -type f -name '*.conf' -print0 |
+	xargs -r0 grep -hE '^address=\/.+\/(([0-9]{1,3}\.){3}[0-9]{1,3}|::|#)?$' |
+		cut -d '/' -f2 |
+			sort -u)
+
+# If there are existing wildcards
+if [[ -n "${existing_wildcards}" ]]; then
+	echo '[i] Removing wildcard matches from gravity'
+	# Convert exact domains (pattern source) - something.com -> ^something.com$
+	match_exact=$(sed 's/^/\^/;s/$/\$/' <<< "${existing_wildcards}")
+	# Convert wildcard domains (pattern source) - something.com - .something.com$
+	match_wildcard=$(sed 's/^/\./;s/$/\$/' <<< "${existing_wildcards}")
 	# Convert target - something.com -> ^something.com$
-        match_target=$(sed 's/^/\^/;s/$/\$/' <<< "$2")
-        # Convert exact domains (pattern source) - something.com -> ^something.com$
-        exact_domains=$(sed 's/^/\^/;s/$/\$/' <<< "$1")
-        # Convert wildcard domains (pattern source) - something.com - .something.com$
-        wildcard_domains=$(sed 's/^/\./;s/$/\$/' <<< "$1")
-	# Combine exact and wildcard matches
-        match_patterns=$(printf '%s\n' "$exact_domains" "$wildcard_domains")
-
-	# Invert match wildcards
-        # Invert match exact domains
-        # Remove start / end markers
-        grep -vFf <(echo "$match_patterns") <<< "$match_target" |
-			sed 's/[\^$]//g'
-}
-
-pihole_update ()
-{
-	echo "# Gravity"
-
-	# Update gravity.list
-	echo "[i] Updating gravity.list"
-	pihole updateGravity > /dev/null
-	# Count gravity entries
-	count_gravity=$(wc -l < $file_gravity)
-	# Status update
-	echo "[i] $count_gravity gravity list entries"
-}
-
-process_wildcards () {
-
-	echo "# Wildcards"
-
-	# Check gravity.list is not empty
-	if [ ! -s $file_gravity ]; then
-			echo "[i] gravity.list is empty or does not exist"
-			return 1
-	fi
-
-	# Fetch initial gravity count
-	count_gravity=$(wc -l < $file_gravity)
-
-	# Grab unique base domains from dnsmasq conf files
-	echo "[i] Fetching wildcards from $dir_wildcards"
-	domains=$(find $dir_wildcards -name "*.conf" -type f -print0 |
-		xargs -r0 grep -hE "^address=\/.+\/(([0-9]+\.){3}[0-9]+|::|#)?$" |
-			cut -d'/' -f2 |
-				sort -u)
+	match_target=$(sed 's/^/\^/;s/$/\$/' "${file_gravity_tmp}")
+	# Compile the exact and wildcard match patterns
+	match_patterns=$(printf '%s\n' "${match_exact}" "${match_wildcard}")
+	# Invert match patterns
+	str_gravity=$(grep -vFf <(echo "${match_patterns}") <<< "${match_target}" | sed 's/[\^$]//g')
 
 	# Conditional exit
-	if [ -z "$domains" ]; then
-			echo "[i] No wildcards were captured from $dir_wildcards"
-			return 1
-	fi
-
-	echo "[i] $(wc -l <<< "$domains") wildcards found"
-
-	# Read gravity.list
-	echo "[i] Reading $file_gravity"
-	gravity_contents=$(cat $file_gravity)
-
-	# Invert match wildcards against gravity.list
-	echo "[i] Removing wildcard matches"
-	new_gravity=$(invertMatchConflicts "$domains" "$gravity_contents")
-
-	# Status update
-	removal_count=$(($count_gravity-$(wc -l <<< "$new_gravity")))
-
-	# If there was an error populating new_gravity.list
-	# Or no changes need to be made
-	if [ -z "$new_gravity" ] || [ "$removal_count" = 0 ]; then
-		echo "[i] No changes required."
-		return 0
-	fi
-
-	# Status update
-	echo "[i] $removal_count unnecessary domains found"
-
-	# Output gravity.list
-	echo "[i] Outputting $file_gravity"
-	echo "$new_gravity" | sudo tee $file_gravity > /dev/null
-
-	# Status update
-	echo "[i] $(wc -l < $file_gravity) domains in gravity.list"
-
-	return 0
-}
-
-process_regex ()
-{
-	echo "# Regexps"
-
-	# Check gravity.list is not empty
-	if [ ! -s $file_gravity ]; then
-			echo "[i] gravity.list is empty or does not exist"
-			return 1
-	fi
-
-	# Count gravity entries
-	count_gravity=$(wc -l < $file_gravity)
-
-	# Only read it if it exists and is not empty
-	if [ -s $file_regex ]; then
-		regexList=$(grep '^[^#]' $file_regex)
+	if [[ -n "${str_gravity}" ]]; then
+		echo "${str_gravity}" > "${file_gravity_tmp}"
 	else
-		echo "[i] Regex list is empty or does not exist."
-		return 1
+		echo '[i] 0 domains remain after wildcard removals'; exit 0;
 	fi
+fi
 
-	# Status update
-	echo "[i] $(wc -l <<< "$regexList") regexps found"
+# Conditional fetch for regex filters
+if [[ $usingDB == true ]]; then
+	str_regex=$(fetchTable "regex")
+else
+	[[ -s "${file_regex}" ]] && str_regex=$(grep '^[^#]' "${file_regex}")
+fi
 
-	# Invert match regex patterns against gravity.list
-	echo "[i] Identifying unnecessary domains"
-
-	new_gravity=$(grep -vEf <(echo "$regexList") $file_gravity)
-
-	# If there are no domains after regex removals
-	if [ -z "$new_gravity" ]; then
-		echo "[i] No unnecessary domains were found"
-		return 0
+# If there are regexps
+if [[ -n "${str_regex}" ]]; then
+	echo '[i] Removing regex matches from gravity'
+	# Invert match regex
+	str_gravity=$(grep -vEf <(echo "${str_regex}") "${file_gravity_tmp}")
+	# Conditional exit
+	if [[ -n "${str_gravity}" ]]; then
+		echo "${str_gravity}" > "${file_gravity_tmp}"
+	else
+		echo '[i] 0 domains remain after regex removals'; exit 0;
 	fi
+fi
 
-	# Status update
-	echo "[i] $(($count_gravity-$(wc -l <<< "$new_gravity"))) unnecessary hosts identified"
+# Save changes to gravity
+echo '[i] Updating gravity database'
+# Conditional save for gravity
+if [[ $usingDB == true ]]; then
+	updateGravityDB "${file_gravity_tmp}"
+else
+	# Overwrite gravity.list
+	sudo cp "${file_gravity_tmp}" "${file_gravity}"
+	# Remove temp file
+	rm -f "${file_gravity_tmp}"
+fi
 
-	# Output file
-	echo "[i] Outputting $file_gravity"
-	echo "$new_gravity" | sudo tee $file_gravity > /dev/null
+# Remove temp files
+echo '[i] Removing temp files'
+[[ -e "${file_gravity_tmp}" ]] && rm -f "${file_gravity_tmp}"
 
-	# Status update
-	echo "[i] $(wc -l < $file_gravity) domains in gravity.list"
+# Conditional fetch of updated gravity domains
+if [[ $usingDB == true ]]; then
+	str_gravity=$(fetchTable "gravity")
+else
+	str_gravity=$(cat "${file_gravity}")
+fi
 
-	return 0
-}
+# Refresh pi-hole
+echo "[i] Refreshing Pihole"
+pihole restartdns reload > /dev/null
 
-finalise () {
-
-	echo "# Finalise"
-
-	# Refresh Pihole
-	echo "[i] Sending SIGHUP to Pihole"
-	sudo killall -SIGHUP pihole-FTL
-}
-
-# Run gravity update
-pihole_update
-# Process wildcard removals
-process_wildcards
-# Process regex removals
-process_regex
-# Finish up
-finalise
+# Some stats
+num_gravity_after=$(wc -l <<< "${str_gravity}")
+echo "[i] $((num_gravity_before-num_gravity_after)) domains were removed from gravity"
+echo "[i] ${num_gravity_after} domains remain in gravity"
