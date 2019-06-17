@@ -40,9 +40,9 @@ Enter `gravityOptimise.sh` in Terminal
 
 
 #### Create a Cron file (running on a schedule)
-This example will run the script every morning at 03:45
+This example will run the script every morning at 05:15
 1. `sudo nano /etc/cron.d/gravityOptimise`
-2. Enter: `45 3   * * *   root    PATH="$PATH:/usr/local/bin/" gravityOptimise.sh`
+2. Enter: `15 5   * * *   root    PATH="$PATH:/usr/local/bin/" gravityOptimise.sh`
 3. Press `CTRL` + `X`
 4. Press `Y`
 5. Press `Enter`
